@@ -32,54 +32,95 @@ ASM_Main:
 	STR R2, [R1, #0]
 	MOVS R2, #0         	@ NOTE: R2 will be dedicated to holding the value on the LEDs
 
-@ TODO: Add code, labels and logic for button checks and LED patterns
+@ Masks for clarity
+.equ SW0_MASK, 0x0001		@ PA0 - step +2 when pressed
+.equ SW1_MASK, 0x0002		@ PA1 - short delay when pressed
+.equ SW2_MASK, 0x0004		@ PA2 - force 0xAA when pressed
+.equ SW3_MASK, 0x0008		@ PA3 - freeze when pressed
 
 main_loop:
-	@ Read switches from GPIOA IDR, invert (pull-ups used), mask SW0..SW3
-	LDR R3, GPIOA_BASE
-	LDR R3, [R3, #0x10]
-	MVNS R3, R3
-	ANDS R3, R3, #0x0F
+	@ Read GPIOA IDR (active-low switches)
+	LDR  R0, GPIOA_BASE
+	LDR  R3, [R0, #0x10]		@ IDR
 
-	@ Determine step size: default 1; if SW0 pressed then 2
+	@ SW3 freeze while held
+	MOVS R5, #SW3_MASK
+	TST  R3, R5			@ pressed -> bit=0 -> Z=1
+	BEQ  state_freeze
+
+	@ SW2 force 0xAA while held
+	MOVS R5, #SW2_MASK
+	TST  R3, R5
+	BEQ  state_force_AA
+
+	@ Step: default 1, if SW0 pressed then 2
 	MOVS R4, #1
-	TST R3, #0x01
-	BEQ 1f
+	MOVS R5, #SW0_MASK
+	TST  R3, R5
+	BNE  step_decided
 	MOVS R4, #2
-1:
+step_decided:
 
-	@ Determine delay value: default LONG; if SW1 pressed then SHORT
-	LDR R5, LONG_DELAY_CNT
-	LDR R7, [R5]
-	TST R3, #0x02
-	BEQ 2f
-	LDR R5, SHORT_DELAY_CNT
-	LDR R7, [R5]
-2:
+	@ Output current value
+	STR  R2, [R1, #0x14]		@ ODR
 
-	@ SW2 forces pattern 0xAA while held
-	TST R3, #0x04
-	BEQ 3f
+	@ Delay selection by SW1
+	LDR  R3, [R0, #0x10]
+	MOVS R5, #SW1_MASK
+	TST  R3, R5
+	BEQ  use_short_delay_normal
+use_long_delay_normal:
+	BL   delay_long
+	B    do_increment
+use_short_delay_normal:
+	BL   delay_short
+
+do_increment:
+	ADDS R2, R2, R4			@ next value
+	UXTB R2, R2			@ keep to 8 bits
+	B    main_loop
+
+@ SW2: force 0xAA
+state_force_AA:
 	MOVS R2, #0xAA
-	B write_and_delay
-3:
-	@ SW3 freezes pattern while held (no update to R2)
-	TST R3, #0x08
-	BNE write_and_delay
+	STR  R2, [R1, #0x14]
+	LDR  R3, [R0, #0x10]
+	MOVS R5, #SW1_MASK
+	TST  R3, R5
+	BEQ  use_short_delay_AA
+use_long_delay_AA:
+	BL   delay_long
+	B    main_loop
+use_short_delay_AA:
+	BL   delay_short
+	B    main_loop
 
-	@ Normal counting: add step and keep to 8 bits
-	ADDS R2, R2, R4
-	UXTB R2, R2
+@ SW3: freeze current value
+state_freeze:
+	STR  R2, [R1, #0x14]
+	LDR  R3, [R0, #0x10]
+	MOVS R5, #SW1_MASK
+	TST  R3, R5
+	BEQ  use_short_delay_freeze
+use_long_delay_freeze:
+	BL   delay_long
+	B    main_loop
+use_short_delay_freeze:
+	BL   delay_short
+	B    main_loop
 
-write_and_delay:
-	@ Write LEDs to GPIOB ODR
-	STR R2, [R1, #0x14]
+@ Busy-wait delays (tune on target clock)
+delay_long:
+	LDR  R6, LONG_DELAY_CNT
+1:	SUBS R6, R6, #1
+	BNE  1b
+	BX   LR
 
-	@ Busy-wait delay
-delay_loop:
-	SUBS R7, R7, #1
-	BNE delay_loop
-	B main_loop
+delay_short:
+	LDR  R6, SHORT_DELAY_CNT
+2:	SUBS R6, R6, #1
+	BNE  2b
+	BX   LR
 
 @ LITERALS; DO NOT EDIT
 	.align
@@ -89,6 +130,6 @@ GPIOA_BASE:  		.word 0x48000000
 GPIOB_BASE:  		.word 0x48000400
 MODER_OUTPUT: 		.word 0x5555
 
-@ TODO: Add your own values for these delays
+@ Delay constants
 LONG_DELAY_CNT: 	.word 1400000	@ ~0.7s at ~8MHz HSI (tune on target)
 SHORT_DELAY_CNT: 	.word 600000	@ ~0.3s at ~8MHz HSI (tune on target)
